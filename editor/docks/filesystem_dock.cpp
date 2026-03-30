@@ -43,6 +43,7 @@
 #include "core/os/os.h"
 #include "core/templates/list.h"
 #include "editor/docks/editor_dock_manager.h"
+#include "editor/file_system/editor_paths.h"
 #include "editor/docks/import_dock.h"
 #include "editor/docks/scene_tree_dock.h"
 #include "editor/editor_interface.h"
@@ -2224,6 +2225,138 @@ void FileSystemDock::_generic_rmb_option_selected(int p_option) {
 	}
 }
 
+String FileSystemDock::_get_project_template_dir() {
+	return EditorPaths::get_singleton()->get_config_dir().path_join("project_template");
+}
+
+void FileSystemDock::_set_as_project_template() {
+	// Check if any files larger than 1 MB are present in the project.
+	const uint64_t size_limit = 1024 * 1024; // 1 MB.
+	Vector<String> large_files;
+	Ref<DirAccess> da = DirAccess::open("res://");
+	Vector<String> dirs_to_scan;
+	dirs_to_scan.push_back("");
+
+	while (dirs_to_scan.size() > 0) {
+		String dir = dirs_to_scan[dirs_to_scan.size() - 1];
+		dirs_to_scan.remove_at(dirs_to_scan.size() - 1);
+
+		String full_dir = dir.is_empty() ? String("res://") : String("res://").path_join(dir);
+		da->change_dir(full_dir);
+		da->list_dir_begin();
+		String f = da->get_next();
+		while (!f.is_empty()) {
+			if (f == "." || f == ".." || f == ".godot" || f == ".git") {
+				f = da->get_next();
+				continue;
+			}
+			String rel_path = dir.is_empty() ? f : dir.path_join(f);
+			if (da->current_is_dir()) {
+				dirs_to_scan.push_back(rel_path);
+			} else {
+				Ref<FileAccess> fa = FileAccess::open(String("res://").path_join(rel_path), FileAccess::READ);
+				if (fa.is_valid()) {
+					uint64_t file_size = fa->get_length();
+					if (file_size > size_limit) {
+						large_files.push_back(rel_path + " (" + String::humanize_size(file_size) + ")");
+					}
+				}
+			}
+			f = da->get_next();
+		}
+		da->list_dir_end();
+	}
+
+	if (large_files.size() > 0) {
+		String file_list;
+		int max_shown = MIN(large_files.size(), 10);
+		for (int i = 0; i < max_shown; i++) {
+			file_list += "  - " + large_files[i] + "\n";
+		}
+		if (large_files.size() > max_shown) {
+			file_list += "  ...and " + itos(large_files.size() - max_shown) + " more.\n";
+		}
+
+		if (!template_warning_dialog) {
+			template_warning_dialog = memnew(ConfirmationDialog);
+			template_warning_dialog->set_title(TTR("Warning"));
+			template_warning_dialog->set_min_size(Size2i(450 * EDSCALE, 0));
+			template_warning_dialog->connect(SceneStringName(confirmed), callable_mp(this, &FileSystemDock::_save_project_template));
+			add_child(template_warning_dialog);
+		}
+		template_warning_dialog->set_text(TTR("This project contains large files (over 1 MB) that will be included in the template:") + "\n\n" + file_list + "\n" + TTR("This is not recommended as it increases the size of every new project. Are you sure you want to continue?"));
+		template_warning_dialog->popup_centered();
+	} else {
+		_save_project_template();
+	}
+}
+
+void FileSystemDock::_save_project_template() {
+	String template_dir = _get_project_template_dir();
+
+	// Remove old template if it exists.
+	Ref<DirAccess> da = DirAccess::create(DirAccess::ACCESS_FILESYSTEM);
+	if (da->dir_exists(template_dir)) {
+		// Recursively remove old template.
+		Ref<DirAccess> old_da = DirAccess::open(template_dir);
+		if (old_da.is_valid()) {
+			// Simple recursive delete using OS.
+			OS::get_singleton()->move_to_trash(template_dir);
+		}
+	}
+	da->make_dir_recursive(template_dir);
+
+	// Copy project files to template directory.
+	String project_dir = ProjectSettings::get_singleton()->get_resource_path();
+	Vector<String> dirs_to_copy;
+	dirs_to_copy.push_back("");
+
+	while (dirs_to_copy.size() > 0) {
+		String rel_dir = dirs_to_copy[dirs_to_copy.size() - 1];
+		dirs_to_copy.remove_at(dirs_to_copy.size() - 1);
+
+		String src_dir = rel_dir.is_empty() ? project_dir : project_dir.path_join(rel_dir);
+		String dst_dir = rel_dir.is_empty() ? template_dir : template_dir.path_join(rel_dir);
+
+		Ref<DirAccess> src_da = DirAccess::open(src_dir);
+		if (src_da.is_null()) {
+			continue;
+		}
+
+		if (!da->dir_exists(dst_dir)) {
+			da->make_dir_recursive(dst_dir);
+		}
+
+		src_da->list_dir_begin();
+		String f = src_da->get_next();
+		while (!f.is_empty()) {
+			if (f == "." || f == ".." || f == ".godot" || f == ".git" || f == ".editorconfig") {
+				f = src_da->get_next();
+				continue;
+			}
+			String src_path = src_dir.path_join(f);
+			String dst_path = dst_dir.path_join(f);
+			String rel_path = rel_dir.is_empty() ? f : rel_dir.path_join(f);
+
+			if (src_da->current_is_dir()) {
+				dirs_to_copy.push_back(rel_path);
+			} else {
+				da->copy(src_path, dst_path);
+			}
+			f = src_da->get_next();
+		}
+		src_da->list_dir_end();
+	}
+
+	// Save a manifest config file.
+	Ref<ConfigFile> manifest;
+	manifest.instantiate();
+	manifest->set_value("template", "source_project", project_dir);
+	manifest->save(template_dir.path_join("project_template.cfg"));
+
+	EditorNode::get_singleton()->show_accept(TTR("Current file layout saved as default project template."), TTR("OK"));
+}
+
 void FileSystemDock::_file_option(int p_option, const Vector<String> &p_selected) {
 	// The first one should be the active item.
 
@@ -2506,6 +2639,19 @@ void FileSystemDock::_file_option(int p_option, const Vector<String> &p_selected
 				favorites_list.erase(p_selected[i]);
 			}
 			EditorSettings::get_singleton()->set_favorites(favorites_list);
+		} break;
+
+		case FILE_MENU_SET_AS_PROJECT_TEMPLATE: {
+			_set_as_project_template();
+		} break;
+
+		case FILE_MENU_CLEAR_PROJECT_TEMPLATE: {
+			String template_dir = _get_project_template_dir();
+			Ref<DirAccess> da = DirAccess::create(DirAccess::ACCESS_FILESYSTEM);
+			if (da->dir_exists(template_dir)) {
+				OS::get_singleton()->move_to_trash(template_dir);
+			}
+			EditorNode::get_singleton()->show_accept(TTR("Default project template cleared."), TTR("OK"));
 		} break;
 
 		case FILE_MENU_SHOW_IN_FILESYSTEM: {
@@ -3532,6 +3678,17 @@ void FileSystemDock::_file_and_folders_fill_popup(PopupMenu *p_popup, const Vect
 		}
 		if (!all_not_favorites) {
 			p_popup->add_icon_item(get_editor_theme_icon(SNAME("NonFavorite")), TTRC("Remove from Favorites"), FILE_MENU_REMOVE_FAVORITE);
+		}
+
+		// Show "Set as Default Project Template" only when res:// root is selected.
+		if (p_paths.size() == 1 && p_paths[0] == "res://") {
+			p_popup->add_separator();
+			Ref<DirAccess> da = DirAccess::create(DirAccess::ACCESS_FILESYSTEM);
+			bool template_exists = da->dir_exists(_get_project_template_dir());
+			p_popup->add_icon_item(get_editor_theme_icon(SNAME("Pin")), TTRC("Set as Default Project Template"), FILE_MENU_SET_AS_PROJECT_TEMPLATE);
+			if (template_exists) {
+				p_popup->add_icon_item(get_editor_theme_icon(SNAME("Remove")), TTRC("Clear Default Project Template"), FILE_MENU_CLEAR_PROJECT_TEMPLATE);
+			}
 		}
 
 		if (root_path_not_selected) {

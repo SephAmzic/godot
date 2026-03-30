@@ -31,6 +31,7 @@
 #include "project_dialog.h"
 
 #include "core/config/project_settings.h"
+#include "core/io/config_file.h"
 #include "core/io/dir_access.h"
 #include "core/io/zip_io.h"
 #include "core/object/callable_mp.h"
@@ -38,6 +39,7 @@
 #include "core/os/os.h"
 #include "core/version.h"
 #include "editor/editor_node.h"
+#include "editor/file_system/editor_paths.h"
 #include "editor/editor_string_names.h"
 #include "editor/gui/editor_file_dialog.h"
 #include "editor/settings/editor_settings.h"
@@ -542,6 +544,55 @@ void ProjectDialog::_nonempty_confirmation_ok_pressed() {
 	ok_pressed();
 }
 
+void ProjectDialog::_apply_project_template(const String &p_project_path) {
+	String template_dir = EditorPaths::get_singleton()->get_config_dir().path_join("project_template");
+	Ref<DirAccess> da = DirAccess::create(DirAccess::ACCESS_FILESYSTEM);
+	if (!da->dir_exists(template_dir)) {
+		return;
+	}
+
+	// Recursively copy template files to the new project.
+	Vector<String> dirs_to_copy;
+	dirs_to_copy.push_back("");
+
+	while (dirs_to_copy.size() > 0) {
+		String rel_dir = dirs_to_copy[dirs_to_copy.size() - 1];
+		dirs_to_copy.remove_at(dirs_to_copy.size() - 1);
+
+		String src_dir = rel_dir.is_empty() ? template_dir : template_dir.path_join(rel_dir);
+		String dst_dir = rel_dir.is_empty() ? p_project_path : p_project_path.path_join(rel_dir);
+
+		Ref<DirAccess> src_da = DirAccess::open(src_dir);
+		if (src_da.is_null()) {
+			continue;
+		}
+
+		if (!da->dir_exists(dst_dir)) {
+			da->make_dir_recursive(dst_dir);
+		}
+
+		src_da->list_dir_begin();
+		String f = src_da->get_next();
+		while (!f.is_empty()) {
+			if (f == "." || f == ".." || f == "project_template.cfg" || f == "project.godot") {
+				f = src_da->get_next();
+				continue;
+			}
+			String src_path = src_dir.path_join(f);
+			String dst_path = dst_dir.path_join(f);
+			String rel_path = rel_dir.is_empty() ? f : rel_dir.path_join(f);
+
+			if (src_da->current_is_dir()) {
+				dirs_to_copy.push_back(rel_path);
+			} else {
+				da->copy(src_path, dst_path);
+			}
+			f = src_da->get_next();
+		}
+		src_da->list_dir_end();
+	}
+}
+
 void ProjectDialog::ok_pressed() {
 	// Before we create a project, check that the target folder is empty.
 	// If not, we need to ask the user if they're sure they want to do this.
@@ -608,13 +659,59 @@ void ProjectDialog::ok_pressed() {
 			return;
 		}
 
-		// Store default project icon in SVG format.
-		Ref<FileAccess> fa_icon = FileAccess::open(path.path_join("icon.svg"), FileAccess::WRITE, &err);
-		if (err != OK) {
-			_set_message(TTRC("Couldn't create icon.svg in project path."), MESSAGE_ERROR);
-			return;
+		// Apply project template if one exists, otherwise write default icon.
+		String template_dir = EditorPaths::get_singleton()->get_config_dir().path_join("project_template");
+		Ref<DirAccess> template_da = DirAccess::create(DirAccess::ACCESS_FILESYSTEM);
+		bool template_applied = false;
+
+		if (template_da->dir_exists(template_dir)) {
+			// Copy template files (folders, assets, etc.) into the new project.
+			_apply_project_template(path);
+			template_applied = true;
+
+			// Merge template project.godot settings into the new project's settings.
+			// Template settings override defaults, but we preserve the new project's
+			// name, features, and renderer which were already set above.
+			String template_project_godot = template_dir.path_join("project.godot");
+			if (FileAccess::exists(template_project_godot)) {
+				Ref<ConfigFile> template_cfg;
+				template_cfg.instantiate();
+				if (template_cfg->load(template_project_godot) == OK) {
+					Vector<String> sections = template_cfg->get_sections();
+					for (const String &section : sections) {
+						Vector<String> keys = template_cfg->get_section_keys(section);
+						for (const String &key : keys) {
+							String full_key = section.is_empty() ? key : section + "/" + key;
+							// Skip settings we already set for the new project.
+							if (full_key == "application/config/name" ||
+									full_key == "application/config/features" ||
+									full_key == "rendering/renderer/rendering_method" ||
+									full_key == "rendering/renderer/rendering_method.mobile") {
+								continue;
+							}
+							initial_settings[full_key] = template_cfg->get_value(section, key);
+						}
+					}
+				}
+			}
+
+			// Re-save project.godot with merged settings.
+			err = ProjectSettings::get_singleton()->save_custom(path.path_join("project.godot"), initial_settings, Vector<String>(), false);
+			if (err != OK) {
+				_set_message(TTRC("Couldn't create project.godot in project path."), MESSAGE_ERROR);
+				return;
+			}
 		}
-		fa_icon->store_string(get_default_project_icon());
+
+		if (!template_applied) {
+			// No template — write default project icon in SVG format.
+			Ref<FileAccess> fa_icon = FileAccess::open(path.path_join("icon.svg"), FileAccess::WRITE, &err);
+			if (err != OK) {
+				_set_message(TTRC("Couldn't create icon.svg in project path."), MESSAGE_ERROR);
+				return;
+			}
+			fa_icon->store_string(get_default_project_icon());
+		}
 
 		EditorVCSInterface::create_vcs_metadata_files(EditorVCSInterface::VCSMetadata(vcs_metadata_selection->get_selected()), path);
 

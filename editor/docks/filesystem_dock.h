@@ -114,6 +114,8 @@ private:
 		FILE_MENU_INSTANTIATE,
 		FILE_MENU_ADD_FAVORITE,
 		FILE_MENU_REMOVE_FAVORITE,
+		FILE_MENU_SET_AS_PROJECT_TEMPLATE,
+		FILE_MENU_CLEAR_PROJECT_TEMPLATE,
 		FILE_MENU_SHOW_IN_FILESYSTEM,
 		FILE_MENU_DEPENDENCIES,
 		FILE_MENU_OWNERS,
@@ -215,6 +217,11 @@ private:
 	CreateDialog *new_resource_dialog = nullptr;
 
 	AcceptDialog *unrecognized_ext_dialog = nullptr;
+
+	ConfirmationDialog *template_warning_dialog = nullptr;
+	void _set_as_project_template();
+	void _save_project_template();
+	static String _get_project_template_dir();
 
 	String confirm_move_to_dir;
 	bool confirm_to_copy = false;

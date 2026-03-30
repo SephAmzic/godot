@@ -147,6 +147,8 @@ private:
 
 	void ok_pressed() override;
 
+	void _apply_project_template(const String &p_project_path);
+
 protected:
 	static void _bind_methods();
 	void _notification(int p_what);
