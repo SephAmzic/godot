@@ -337,6 +337,10 @@ def configure(env: "SConsEnvironment"):
                 )
                 sys.exit(255)
 
+    # Workaround for Xcode 26 beta: libc++ .tbd stub is missing __hash_memory
+    # even though the symbol exists in the runtime dyld shared cache.
+    env.Append(LINKFLAGS=["-Wl,-undefined,dynamic_lookup"])
+
     if len(extra_frameworks) > 0:
         frameworks = [item for key in sorted(extra_frameworks) for item in ["-framework", key]]
         env.Append(LINKFLAGS=frameworks)
